@@ -1,0 +1,6 @@
+﻿metrik,nokta,ga_alt,ga_ust
+sens_definite_or_suspicious_truth,0.878,0.859,0.897
+spec_definite_or_suspicious_truth,0.945,0.935,0.956
+alert_rate_suspicious_only_panels,0.648,0.6,0.694
+n_suspicious_only_panels,494.0,444.0,544.0
+n_positive_definite_or_suspicious,1473.0,1376.975,1573.0

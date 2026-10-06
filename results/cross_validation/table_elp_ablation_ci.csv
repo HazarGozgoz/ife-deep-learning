@@ -1,0 +1,4 @@
+﻿condition,versus,d_any_band_sens,d_sens_ci,mcnemar_sens_discordant,mcnemar_sens_p,d_band_macro_f1,d_f1_ci,d_pattern_acc,d_pat_ci,mcnemar_pat_discordant,mcnemar_pat_p
+ELP masked,intact,-0.131,"(np.float64(-0.16), np.float64(-0.104))",151/23,2.8309418823858135e-24,-0.148,"(np.float64(-0.191), np.float64(-0.098))",-0.053,"(np.float64(-0.066), np.float64(-0.04))",271/81,4.516671993482826e-25
+ELP masked,control (bottom masked),-0.124,"(np.float64(-0.153), np.float64(-0.095))",156/35,1.9585913081662178e-19,-0.138,"(np.float64(-0.182), np.float64(-0.086))",-0.037,"(np.float64(-0.052), np.float64(-0.022))",325/193,7.196633733648815e-09
+control (bottom masked),intact,-0.007,"(np.float64(-0.018), np.float64(0.003))",18/11,0.26493089646101,-0.011,"(np.float64(-0.026), np.float64(0.002))",-0.016,"(np.float64(-0.027), np.float64(-0.006))",153/95,0.0002785112949743028

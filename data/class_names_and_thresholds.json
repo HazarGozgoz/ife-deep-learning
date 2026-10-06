@@ -1,0 +1,38 @@
+{
+  "band_classes": [
+    "IGG_KAPPA",
+    "IGG_LAMBDA",
+    "IGA_KAPPA",
+    "IGA_LAMBDA",
+    "IGM_KAPPA",
+    "IGM_LAMBDA",
+    "IGG_NO_LIGHT_CHAIN",
+    "IGA_NO_LIGHT_CHAIN",
+    "IGM_NO_LIGHT_CHAIN",
+    "FREE_KAPPA",
+    "FREE_LAMBDA"
+  ],
+  "band_thresholds_maxF1": [
+    0.9538,
+    0.6207,
+    0.5709,
+    0.5,
+    0.8716,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5
+  ],
+  "pattern_classes": [
+    "NO_MONOCLONAL_BAND",
+    "POLYCLONAL_HYPERGAMMAGLOBULINEMIA",
+    "SUSPICIOUS_BAND",
+    "MONOCLONAL_GAMMOPATHY",
+    "BICLONAL_GAMMOPATHY",
+    "OLIGOCLONAL_BANDS",
+    "ATYPICAL_PATTERN",
+    "UNINTERPRETABLE_TECHNICAL_ISSUE"
+  ]
+}

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.DS_Store
+*.pth
+*.npz
+*.png
+*.tiff
+Cropped_Data_EN/
+A4_Taramalar/
+Defter/

@@ -1,0 +1,9 @@
+﻿pattern,n,recall,recall_ci,precision,precision_ci
+No monoclonal band,228,0.154,0.091–0.222,0.795,0.659–0.900
+Polyclonal increase,45,0.2,0.053–0.328,0.164,0.026–0.310
+Suspicious band,93,0.108,0.043–0.189,0.312,0.130–0.500
+Monoclonal,235,0.987,0.967–1.000,0.487,0.445–0.530
+Biclonal,19,0.053,0.000–0.143,1.0,0.000–1.000
+Oligoclonal,0,0.0,0.000–0.000,0.0,0.000–0.000
+Atypical,0,0.0,0.000–0.000,0.0,0.000–0.000
+Uninterpretable,0,0.0,0.000–0.000,0.0,0.000–0.000

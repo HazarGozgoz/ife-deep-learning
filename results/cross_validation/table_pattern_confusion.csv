@@ -1,0 +1,9 @@
+﻿,Model: No monoclonal band,Model: Polyclonal increase,Model: Suspicious band,Model: Monoclonal,Model: Biclonal,Model: Oligoclonal,Model: Atypical,Model: Uninterpretable
+Expert: No monoclonal band,1668,47,79,6,1,0,0,1
+Expert: Polyclonal increase,93,150,24,0,0,0,0,0
+Expert: Suspicious band,156,18,274,44,2,0,0,0
+Expert: Monoclonal,3,1,39,834,20,1,0,1
+Expert: Biclonal,1,0,2,33,35,0,0,2
+Expert: Oligoclonal,0,0,0,3,2,1,0,1
+Expert: Atypical,2,0,0,1,0,0,0,0
+Expert: Uninterpretable,20,2,2,12,1,0,0,14
