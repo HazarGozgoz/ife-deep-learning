@@ -12,6 +12,9 @@ CIKTILAR (yayin_ciktilari/ altina)
   table3_bands_ci.csv           11 bant sinifi + gruplar: sens/spec/PPV/F1/AUC (GA ile)
   table_pattern_confusion.csv   8x8 patern karisiklik matrisi (satir=uzman)
   table_pattern_per_class.csv   patern sinifi basina recall/precision (GA ile)
+  table_pattern_grouped_*.csv   SADELESTIRILMIS patern (4 klinik sinif + yorumlanamaz), GA ile
+  table_alert_by_type.csv       tip grubu basina: tip dogrulugu vs "uyari verdi" orani, GA ile
+  Figure1b_pattern_grouped_confusion.tiff / .png
   table_suspicious_analysis.csv supheli etiketli bantlar pozitif sayilinca duyarlilik
                                 (cv/kat_*/test_annotations.csv gerekir; yoksa atlanir)
   Figure1_pattern_confusion.tiff / .png    Ingilizce, 1000 dpi LZW
@@ -39,19 +42,102 @@ from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_
 BANT_VAR = {"MONOCLONAL_GAMMOPATHY", "BICLONAL_GAMMOPATHY", "OLIGOCLONAL_BANDS"}
 OUT = Path("yayin_ciktilari")
 
-PATTERN_EN = {"NO_MONOCLONAL_BAND": "No monoclonal band",
+PATTERN_EN = {"NO_MONOCLONAL_BAND": "Normal pattern",
               "POLYCLONAL_HYPERGAMMAGLOBULINEMIA": "Polyclonal increase",
-              "SUSPICIOUS_BAND": "Suspicious band",
-              "MONOCLONAL_GAMMOPATHY": "Monoclonal",
-              "BICLONAL_GAMMOPATHY": "Biclonal",
-              "OLIGOCLONAL_BANDS": "Oligoclonal",
-              "ATYPICAL_PATTERN": "Atypical",
+              "SUSPICIOUS_BAND": "Indeterminate band",
+              "MONOCLONAL_GAMMOPATHY": "Single paraprotein",
+              "BICLONAL_GAMMOPATHY": "Two paraproteins",
+              "OLIGOCLONAL_BANDS": "Oligoclonal bands",
+              "ATYPICAL_PATTERN": "Atypical pattern",
               "UNINTERPRETABLE_TECHNICAL_ISSUE": "Uninterpretable"}
 BAND_EN = {"IGG_KAPPA": "IgG κ", "IGG_LAMBDA": "IgG λ", "IGA_KAPPA": "IgA κ", "IGA_LAMBDA": "IgA λ",
-           "IGM_KAPPA": "IgM κ", "IGM_LAMBDA": "IgM λ", "IGG_NO_LIGHT_CHAIN": "IgG heavy chain only",
-           "IGA_NO_LIGHT_CHAIN": "IgA heavy chain only", "IGM_NO_LIGHT_CHAIN": "IgM heavy chain only",
-           "FREE_KAPPA": "Free κ", "FREE_LAMBDA": "Free λ"}
+           "IGM_KAPPA": "IgM κ", "IGM_LAMBDA": "IgM λ", "IGG_NO_LIGHT_CHAIN": "IgG, no light chain",
+           "IGA_NO_LIGHT_CHAIN": "IgA, no light chain", "IGM_NO_LIGHT_CHAIN": "IgM, no light chain",
+           "FREE_KAPPA": "Monoclonal free κ", "FREE_LAMBDA": "Monoclonal free λ"}
 DEVICE_EN = {"INTERLAB": "Interlab", "HELENA": "Helena"}
+
+
+# Sadelestirilmis patern siniflari (yeniden egitim yok; tahmin ve referans gruplanir).
+# Terminoloji AACB onerilerine (Tate 2012, Ann Clin Biochem 49:242) gore:
+#  - 'paraprotein' (M-protein/M-band yerine); poliklonal artis paraprotein-disi bir paterndir
+#  - oligoklonal bantlar reaktif bir paterndir, paraprotein ile birlestirilmez
+#  - biklonal = birden fazla paraprotein -> 'paraprotein saptandi' icinde
+PATERN_GRUP = {"NO_MONOCLONAL_BAND": "Paraprotein not detected",
+               "POLYCLONAL_HYPERGAMMAGLOBULINEMIA": "Paraprotein not detected",
+               "MONOCLONAL_GAMMOPATHY": "Paraprotein detected",
+               "BICLONAL_GAMMOPATHY": "Paraprotein detected",
+               "OLIGOCLONAL_BANDS": "Oligoclonal bands",
+               "SUSPICIOUS_BAND": "Indeterminate band",
+               "ATYPICAL_PATTERN": "Indeterminate band",
+               "UNINTERPRETABLE_TECHNICAL_ISSUE": "Uninterpretable"}
+GRUP_SIRA = ["Paraprotein not detected", "Paraprotein detected", "Oligoclonal bands",
+             "Indeterminate band", "Uninterpretable"]
+TIP_GRUP_AD = {"intact": "Intact immunoglobulin paraprotein (heavy + light chain)",
+               "heavy": "Heavy-chain band without light chain",
+               "flc": "Monoclonal free light chain"}
+# Model uyarisi: herhangi bir bant basligi pozitif VEYA patern monoklonal/biklonal/oligoklonal/supheli
+UYARI_PATERN = {"MONOCLONAL_GAMMOPATHY", "BICLONAL_GAMMOPATHY", "OLIGOCLONAL_BANDS", "SUSPICIOUS_BAND"}
+
+
+def _grupla(pc, arr):
+    tab = np.array([GRUP_SIRA.index(PATERN_GRUP.get(c, "Indeterminate band")) for c in pc])
+    return tab[np.asarray(arr, int)]
+
+
+def gruplu_patern_metrikleri(d, idx):
+    pc = list(d["pattern_classes"])
+    gt, gp = _grupla(pc, d["pattern_true"][idx]), _grupla(pc, d["pattern_pred"][idx])
+    yor = gt != GRUP_SIRA.index("Uninterpretable")
+    out = {"_ozet": {"accuracy_interpretable": float((gt[yor] == gp[yor]).mean()) if yor.any() else np.nan,
+                     "accuracy_all": float((gt == gp).mean())}}
+    for g, ad in enumerate(GRUP_SIRA):
+        t, p = (gt == g).astype(int), (gp == g).astype(int)
+        m = _ss(t, p)
+        out[ad] = {"recall": m["sens"] if t.sum() else np.nan, "precision": m["ppv"] if p.sum() else np.nan,
+                   "n": float(t.sum())}
+    return out
+
+
+def uyari_metrikleri(d, idx):
+    """Tip dogrulugu ile 'uzmana yonlendirme uyarisi' ayrimi (bant gecerli paneller)."""
+    pc, bc = list(d["pattern_classes"]), list(d["band_classes"])
+    bv = d["band_valid"][idx] if "band_valid" in d.files else np.ones(len(idx), bool)
+    ii = idx[bv]
+    bt, bp = d["band_true"][ii], d["band_pred"][ii]
+    pt, pp = d["pattern_true"][ii], d["pattern_pred"][ii]
+    uyari = (bp.max(1) == 1) | np.isin(pp, [pc.index(c) for c in UYARI_PATERN if c in pc])
+    out = {}
+    gruplar = {TIP_GRUP_AD["intact"]: [i for i, c in enumerate(bc) if ("KAPPA" in c or "LAMBDA" in c) and not c.startswith("FREE")],
+               TIP_GRUP_AD["heavy"]: [i for i, c in enumerate(bc) if "NO_LIGHT" in c],
+               TIP_GRUP_AD["flc"]: [i for i, c in enumerate(bc) if c.startswith("FREE")]}
+    for ad, cols in list(gruplar.items()) + [(BAND_EN.get(c, c), [i]) for i, c in enumerate(bc)]:
+        m = bt[:, cols].max(1) == 1
+        out[ad] = {"n": float(m.sum()),
+                   "type_correct": float((bp[m][:, cols].max(1) == 1).mean()) if m.any() else np.nan,
+                   "alert": float(uyari[m].mean()) if m.any() else np.nan}
+    if "OLIGOCLONAL_BANDS" in pc:
+        m = pt == pc.index("OLIGOCLONAL_BANDS")
+        out["Oligoclonal bands (pattern)"] = {"n": float(m.sum()),
+                                      "type_correct": float((pp[m] == pc.index("OLIGOCLONAL_BANDS")).mean()) if m.any() else np.nan,
+                                      "alert": float(uyari[m].mean()) if m.any() else np.nan}
+    poz = bt.max(1) == 1
+    neg = np.isin(pt, [pc.index(c) for c in ("NO_MONOCLONAL_BAND", "POLYCLONAL_HYPERGAMMAGLOBULINEMIA") if c in pc]) & ~poz
+    out["_genel"] = {"alert_sensitivity_definite_band": float(uyari[poz].mean()) if poz.any() else np.nan,
+                     "alert_specificity_no_band": float((~uyari[neg]).mean()) if neg.any() else np.nan,
+                     "alert_npv": float(neg[~uyari & (poz | neg)].mean()) if (~uyari & (poz | neg)).any() else np.nan,
+                     "n_positive": float(poz.sum()), "n_negative": float(neg.sum()),
+                     "n_unflagged": float((~uyari & (poz | neg)).sum())}
+    return out
+
+
+def _cp(k, n):
+    """Clopper-Pearson kesin %95 GA (kucuk gruplar ve %100 oranlar icin)."""
+    from scipy.stats import beta
+    if n == 0:
+        return np.nan, np.nan
+    lo = beta.ppf(0.025, k, n - k + 1) if k > 0 else 0.0
+    hi = beta.ppf(0.975, k + 1, n - k) if k < n else 1.0
+    return lo, hi
 
 
 def _tiff(fig, ad, dpi):
@@ -111,10 +197,10 @@ def sinif_metrikleri(d, idx):
     """Bant sinifi basina + grup basina sens/spec/ppv/f1/auc."""
     bt, bp, bpr, _ = band_altkume(d, idx)
     bc = list(d["band_classes"])
-    gruplar = {"Clone-defined band (Ig-κ/λ)": [i for i, c in enumerate(bc) if ("KAPPA" in c or "LAMBDA" in c) and not c.startswith("FREE")],
-               "Heavy chain without light chain": [i for i, c in enumerate(bc) if "NO_LIGHT" in c],
-               "Free light chain": [i for i, c in enumerate(bc) if c.startswith("FREE")],
-               "Any monoclonal band": list(range(len(bc)))}
+    gruplar = {TIP_GRUP_AD["intact"]: [i for i, c in enumerate(bc) if ("KAPPA" in c or "LAMBDA" in c) and not c.startswith("FREE")],
+               TIP_GRUP_AD["heavy"]: [i for i, c in enumerate(bc) if "NO_LIGHT" in c],
+               TIP_GRUP_AD["flc"]: [i for i, c in enumerate(bc) if c.startswith("FREE")],
+               "Any paraprotein band": list(range(len(bc)))}
     out = {}
     for i, c in enumerate(bc):
         m = _ss(bt[:, i], bp[:, i]); m["auc"] = _auc(bt[:, i], bpr[:, i]); m["n"] = int(bt[:, i].sum())
@@ -247,6 +333,9 @@ def main():
     ap.add_argument("--tiff-dpi", type=int, default=1000)
     ap.add_argument("--etiket-kaynagi", default=None, help="annotations_master.csv: gercek etiketleri buradan yenile")
     ap.add_argument("--tamamla", action="store_true", help="Master'da olup havuzda olmayan panelleri kat modeliyle tahmin edip ekle")
+    ap.add_argument("--platform-kirilimi", action="store_true",
+                    help="Uyari duyarlilik/ozgulluk/NPV degerlerini platform (device) bazinda da ver "
+                         "-> table_alert_by_platform.csv")
     ap.add_argument("--jel-filtre", default=None,
                     help="CSV (source_file sutunu): yalniz bu jellerin panelleri degerlendirilir "
                          "(uyarlama egrisinde N=0 karsilastirmasi icin).")
@@ -350,9 +439,9 @@ def main():
     bt, bp, bpr, _ = band_altkume(d, idx_all); bc = list(d["band_classes"])
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.6))
     for ax, sec, baslik in ((axes[0], [c for c in bc if ("KAPPA" in c or "LAMBDA" in c) and not c.startswith("FREE")],
-                             "Clone-defined bands"),
+                             "Intact immunoglobulin paraproteins"),
                             (axes[1], [c for c in bc if "NO_LIGHT" in c or c.startswith("FREE")],
-                             "Single-lane bands")):
+                             "Heavy-chain-only and free light-chain bands")):
         for c in sec:
             i = bc.index(c)
             if 0 < bt[:, i].sum() < len(bt):
@@ -381,6 +470,97 @@ def main():
     ax.set_ylabel("Value (95% CI)")
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=len(cih), frameon=False)
     fig.tight_layout(); _tiff(fig, "Figure3_platform", a.tiff_dpi)
+
+    # ---------- SADELESTIRILMIS PATERN (4 klinik sinif + yorumlanamaz) ----------
+    gpt, gpp = _grupla(pc, d["pattern_true"]), _grupla(pc, d["pattern_pred"])
+    cmg = confusion_matrix(gpt, gpp, labels=range(len(GRUP_SIRA)))
+    pd.DataFrame(cmg, index=[f"Expert: {c}" for c in GRUP_SIRA], columns=[f"Model: {c}" for c in GRUP_SIRA]).to_csv(
+        OUT / "table_pattern_grouped_confusion.csv", encoding="utf-8-sig")
+    nokta, ornek, _ = bootstrap(gruplu_patern_metrikleri, d, idx_all, jeller, rng, a.tekrar)
+    rows = []
+    print("\nSADELESTIRILMIS PATERN (4 klinik sinif + yorumlanamaz)")
+    for k in ("accuracy_interpretable", "accuracy_all"):
+        lo, hi = ga(ornek, "_ozet", k)
+        print(f"  {k:<28}{nokta['_ozet'][k]:.3f}  [{lo:.3f} - {hi:.3f}]")
+        rows.append({"pattern_group": k, "n": n, "recall": round(nokta["_ozet"][k], 3), "recall_ci": f"{lo:.3f}–{hi:.3f}"})
+    for c in GRUP_SIRA:
+        m = nokta[c]; lo, hi = ga(ornek, c, "recall"); lo2, hi2 = ga(ornek, c, "precision")
+        rows.append({"pattern_group": c, "n": int(m["n"]), "recall": round(m["recall"], 3), "recall_ci": f"{lo:.3f}–{hi:.3f}",
+                     "precision": round(m["precision"], 3), "precision_ci": f"{lo2:.3f}–{hi2:.3f}"})
+        print(f"  {c:<28}n={int(m['n']):5d}  recall {m['recall']:.3f} [{lo:.3f}-{hi:.3f}]  precision {m['precision']:.3f} [{lo2:.3f}-{hi2:.3f}]")
+    pd.DataFrame(rows).to_csv(OUT / "table_pattern_grouped_per_class.csv", index=False, encoding="utf-8-sig")
+    fig, ax = plt.subplots(figsize=(6.5, 5.5))
+    normg = cmg / np.maximum(cmg.sum(1, keepdims=True), 1)
+    im = ax.imshow(normg, cmap="Blues", vmin=0, vmax=1)
+    ax.set_xticks(range(len(GRUP_SIRA))); ax.set_yticks(range(len(GRUP_SIRA)))
+    ax.set_xticklabels(GRUP_SIRA, rotation=35, ha="right", fontsize=8); ax.set_yticklabels(GRUP_SIRA, fontsize=8)
+    ax.set_xlabel("Model prediction"); ax.set_ylabel("Reference standard")
+    for i in range(len(GRUP_SIRA)):
+        for j in range(len(GRUP_SIRA)):
+            if cmg[i, j]:
+                ax.text(j, i, str(cmg[i, j]), ha="center", va="center", fontsize=8,
+                        color="white" if normg[i, j] > 0.5 else "black")
+    fig.colorbar(im, ax=ax, fraction=0.046, label="Row-normalised proportion")
+    fig.tight_layout(); _tiff(fig, "Figure1b_pattern_grouped_confusion", a.tiff_dpi)
+
+    # ---------- TIP DOGRULUGU vs UYARI ----------
+    nokta, ornek, _ = bootstrap(uyari_metrikleri, d, idx_all, jeller, rng, a.tekrar)
+    rows = []
+    print("\nTIP DOGRULUGU vs UZMANA YONLENDIRME UYARISI (bant gecerli paneller)")
+    print(f"  {'':<58}{'n':>5}  {'tip dogru [GA]':<22}{'uyari verdi [kesin GA]':<22}")
+    for k, m in nokta.items():
+        if k.startswith("_"):
+            continue
+        lo, hi = ga(ornek, k, "type_correct"); lo2, hi2 = ga(ornek, k, "alert")
+        nn = int(m["n"]); ka = int(round(m["alert"] * nn)); kt = int(round(m["type_correct"] * nn))
+        cl, ch = _cp(ka, nn); tl, th = _cp(kt, nn)
+        rows.append({"group": k, "n_positive": nn, "type_correct": round(m["type_correct"], 3),
+                     "type_correct_ci_bootstrap": f"{lo:.3f}–{hi:.3f}", "type_correct_ci_exact": f"{tl:.3f}–{th:.3f}",
+                     "alerted": f"{ka}/{nn}", "alert": round(m["alert"], 3),
+                     "alert_ci_bootstrap": f"{lo2:.3f}–{hi2:.3f}", "alert_ci_exact": f"{cl:.3f}–{ch:.3f}"})
+        print(f"  {k:<58}{nn:>5}  {m['type_correct']:.3f} [{lo:.3f}-{hi:.3f}]    {ka}/{nn} = {m['alert']:.3f} (kesin GA {cl:.3f}-{ch:.3f})")
+    for k in ("alert_sensitivity_definite_band", "alert_specificity_no_band", "alert_npv"):
+        lo, hi = ga(ornek, "_genel", k)
+        rows.append({"group": k, "n_positive": int(nokta["_genel"]["n_positive"]), "alert": round(nokta["_genel"][k], 3),
+                     "alert_ci": f"{lo:.3f}–{hi:.3f}"})
+        print(f"  {k:<58}       {nokta['_genel'][k]:.3f} [{lo:.3f}-{hi:.3f}]")
+    pd.DataFrame(rows).to_csv(OUT / "table_alert_by_type.csv", index=False, encoding="utf-8-sig")
+    print(f"-> {OUT}/table_alert_by_type.csv, table_pattern_grouped_*.csv")
+    print("   Not: uyari oranlarinda kesin (Clopper-Pearson) GA raporlanir; %100 oranlarda bootstrap GA bilgi vermez.")
+
+    # ---------- Uyari metriklerinin platform kirilimi (--platform-kirilimi) ----------
+    if a.platform_kirilimi:
+        print("\nUZMANA YONLENDIRME UYARISI -- PLATFORM KIRILIMI")
+        print(f"  {'platform':<12}{'olcut':<30}{'n':>7}{'nokta':>8}"
+              f"{'%95 GA (bootstrap)':>22}{'%95 GA (kesin)':>20}")
+        PAYDA = {"alert_sensitivity_definite_band": "n_positive",
+                 "alert_specificity_no_band": "n_negative",
+                 "alert_npv": "n_unflagged"}
+        prows = []
+        for dv in ["ALL"] + sorted(np.unique(dev).tolist()):
+            idx_d = idx_all if dv == "ALL" else idx_all[dev == dv]
+            njd_u = len(np.unique(jeller[idx_d]))
+            if njd_u < 2:
+                print(f"  {dv:<12}atlandi (jel sayisi {njd_u} < 2)")
+                continue
+            nd, od, njd = bootstrap(uyari_metrikleri, d, idx_d, jeller, rng, a.tekrar)
+            g = nd["_genel"]
+            for k, pay in PAYDA.items():
+                lo, hi = ga(od, "_genel", k)
+                nn = int(g[pay])
+                kk = int(round(g[k] * nn))
+                cl, ch = _cp(kk, nn)
+                prows.append({"platform": dv, "metric": k, "n": nn, "k": kk,
+                              "point": round(g[k], 3),
+                              "ci_bootstrap": f"{lo:.3f}–{hi:.3f}",
+                              "ci_exact": f"{cl:.3f}–{ch:.3f}",
+                              "n_kirpma": len(idx_d), "n_jel": njd})
+                print(f"  {dv:<12}{k:<30}{nn:>7}{g[k]:>8.3f}"
+                      f"{f'[{lo:.3f} - {hi:.3f}]':>22}{f'[{cl:.3f} - {ch:.3f}]':>20}")
+        pd.DataFrame(prows).to_csv(OUT / "table_alert_by_platform.csv",
+                                   index=False, encoding="utf-8-sig")
+        print(f"-> {OUT}/table_alert_by_platform.csv")
+        print("   Not: bootstrap GA jel bazinda kumelenmis; kesin GA Clopper-Pearson.")
 
     # ---------- Supheli etiket analizi (kat CSV'leri gerekli) ----------
     csvs = sorted(glob.glob(os.path.join(a.kat_dizin, "kat_*", "test_annotations.csv")))

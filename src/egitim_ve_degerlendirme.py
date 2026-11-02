@@ -20,7 +20,11 @@ KULLANICI KARARLARI (bu çalışmaya özgü)
     "sadece kesin bantlar" duyarlılık analizi de üretilir.
   * Poliklonal lane bilgisi AYRI bir çıktı ekseni olarak tahmin edilir.
 
-Korunanlar: ConvNeXt-Tiny, katmanlı öğrenme oranı + ısınma, cosine
+OMURGA KARSILASTIRMASI (--omurga=): varsayilan convnext_tiny (yayindaki
+model; dosya adlari ve .pth anahtarlari DEGISMEZ). Digerleri: resnet50,
+efficientnet_b0, densenet121, swin_t -- ayni egitim ayarlariyla.
+
+Korunanlar: ConvNeXt-Tiny (varsayilan), katmanlı öğrenme oranı + ısınma, cosine
 annealing warm restarts, gradyan kırpma, PR-eğrisi tabanlı eşik
 optimizasyonu (kritik bantlarda ≥%70 duyarlılık tabanı), cihaz
 genellemesi için gri tonlama + ağır fotometrik augmentasyon, YZ
@@ -49,7 +53,8 @@ from sklearn.metrics import (auc, average_precision_score, classification_report
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
-from torchvision.models import ConvNeXt_Tiny_Weights
+from torchvision.models import (ConvNeXt_Tiny_Weights, DenseNet121_Weights,
+                                EfficientNet_B0_Weights, ResNet50_Weights, Swin_T_Weights)
 
 from ife_taxonomy import (BAND_CLASSES, BAND_EN, BAND_EN_SHORT, BAND_TR, FLAG_CLASSES,
                           FLAG_EN, FLAG_TR, PATTERN_EN, band_label,
@@ -116,6 +121,12 @@ POS_WEIGHT_MAX = _arg("pos-weight-max", 10.0, float)
 SECIM_OLCUTU = _arg("secim", "f1")
 # 5) Cikti dili (sekil/tablo basliklari): tr | en
 DIL = _arg("dil", "en")
+# 6) Omurga (backbone). Varsayilan yayindaki model. Karsilastirma icin:
+#    --omurga=resnet50 | efficientnet_b0 | densenet121 | swin_t
+OMURGALAR = ("convnext_tiny", "resnet50", "efficientnet_b0", "densenet121", "swin_t")
+OMURGA = _arg("omurga", "convnext_tiny").strip().lower()
+if OMURGA not in OMURGALAR:
+    raise SystemExit(f"Bilinmeyen omurga '{OMURGA}'. Secenekler: {', '.join(OMURGALAR)}")
 _b = _arg("batch", None, int)
 if _b:
     BATCH_SIZE = _b
@@ -124,6 +135,9 @@ elif COZUNURLUK >= 384:
 elif COZUNURLUK >= 320:
     BATCH_SIZE = 12
 CIKTI_ETIKETI = f"{BANT_HEDEFI}_{COZUNURLUK}px_pw{int(POS_WEIGHT_MAX)}"
+# Varsayilan omurgada etiket DEGISMEZ (eski .pth ve klasor adlari gecerli kalir)
+if OMURGA != "convnext_tiny":
+    CIKTI_ETIKETI += f"_{OMURGA}"
 # --etiket=<ad> : model dosyasi ve cikti klasoru adina eklenir; ayni ayarla
 # ikinci bir deney (orn. helena_holdout) onceki ciktilari EZMESIN diye.
 _ETIKET_EK = _arg("etiket", "").strip()
@@ -149,7 +163,7 @@ LANE_L = ({"IGG": "IgG", "IGA": "IgA", "IGM": "IgM", "KAPPA": "κ", "LAMBDA": "�
           if DIL == "en" else POLY_LANE_TR)
 if "--sadece-degerlendir" not in sys.argv:
     print(f"DENEY: bant_hedefi={BANT_HEDEFI} cozunurluk={COZUNURLUK} batch={BATCH_SIZE} "
-          f"pos_weight_max={POS_WEIGHT_MAX} secim={SECIM_OLCUTU} dil={DIL}")
+          f"pos_weight_max={POS_WEIGHT_MAX} secim={SECIM_OLCUTU} dil={DIL} omurga={OMURGA}")
 MODEL_PATH = f"best_ife_{CIKTI_ETIKETI}.pth"
 FIG_DIR = f"{FIG_DIR}_{CIKTI_ETIKETI}" + ("_dengeli" if ESIK_MODU == "dengeli" else "")
 
@@ -316,12 +330,34 @@ full_ld = DataLoader(full_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=
 # ===========================================================================
 # 3) MODEL -- tek gövde, dört başlık
 # ===========================================================================
+def omurga_kur(ad):
+    """ImageNet on-egitimli govdeyi kurar, siniflandirma katmanini kaldirir.
+    Dondurur: (govde, ozellik boyutu). Tum govdeler ayni girdiyi alir
+    (COZUNURLUK px, gri tonlama -> 3 kanal, ImageNet normalizasyonu)."""
+    if ad == "convnext_tiny":
+        b = models.convnext_tiny(weights=ConvNeXt_Tiny_Weights.DEFAULT)
+        n = b.classifier[2].in_features; b.classifier[2] = nn.Identity()
+    elif ad == "resnet50":
+        b = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        n = b.fc.in_features; b.fc = nn.Identity()
+    elif ad == "efficientnet_b0":
+        b = models.efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1)
+        n = b.classifier[1].in_features; b.classifier[1] = nn.Identity()
+    elif ad == "densenet121":
+        b = models.densenet121(weights=DenseNet121_Weights.IMAGENET1K_V1)
+        n = b.classifier.in_features; b.classifier = nn.Identity()
+    elif ad == "swin_t":
+        b = models.swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
+        n = b.head.in_features; b.head = nn.Identity()
+    else:
+        raise ValueError(ad)
+    return b, n
+
+
 class IFEMultiHead(nn.Module):
     def __init__(self):
         super().__init__()
-        base = models.convnext_tiny(weights=ConvNeXt_Tiny_Weights.DEFAULT)
-        self.n_feat = base.classifier[2].in_features
-        base.classifier[2] = nn.Identity()
+        base, self.n_feat = omurga_kur(OMURGA)
         self.backbone = base
         self.head_pattern = nn.Linear(self.n_feat, N_PAT)
         self.head_bands = nn.Linear(self.n_feat, N_BAND)
@@ -335,6 +371,8 @@ class IFEMultiHead(nn.Module):
 
 
 model = IFEMultiHead().to(DEVICE)
+N_PARAM = sum(p.numel() for p in model.parameters())
+print(f"Omurga: {OMURGA}  |  parametre: {N_PARAM / 1e6:.1f} M")
 HEAD_KEYS = ("head_pattern", "head_bands", "head_flags", "head_lanes")
 bb_params = [p for n, p in model.named_parameters() if not any(k in n for k in HEAD_KEYS)]
 hd_params = [p for n, p in model.named_parameters() if any(k in n for k in HEAD_KEYS)]
@@ -409,6 +447,8 @@ def predict(loader):
 # 4) EĞİTİM
 # ===========================================================================
 best, no_imp = -1.0, 0
+T_EGITIM_BASLA = time.time()
+N_EPOCH_KOSULAN = 0
 if SKIP_TRAIN:
     if not Path(MODEL_PATH).exists():
         raise SystemExit(f"'{MODEL_PATH}' yok -- once egitimi calistirin.")
@@ -421,7 +461,10 @@ for ep in ([] if SKIP_TRAIN else range(EPOCHS)):
     if ep == WARMUP_EPOCHS:
         set_backbone_trainable(True)
         for m in model.modules():
-            if isinstance(m, nn.LayerNorm):
+            # Normalizasyon katmanlarinin olcek/kaydirma parametreleri donuk
+            # kalir (ConvNeXt/Swin: LayerNorm, ResNet/DenseNet/EfficientNet:
+            # BatchNorm). Tum omurgalarda ayni politika.
+            if isinstance(m, (nn.LayerNorm, nn.BatchNorm2d)):
                 for p in m.parameters():
                     p.requires_grad = False
         optimizer.param_groups[0]["lr"] = BACKBONE_LR * 0.3
@@ -462,9 +505,11 @@ for ep in ([] if SKIP_TRAIN else range(EPOCHS)):
         torch.save(model.state_dict(), MODEL_PATH)
     else:
         no_imp += 1
+    N_EPOCH_KOSULAN = ep + 1
     if no_imp >= PATIENCE:
         print(f"[!] Early stopping (en iyi hibrit={best:.4f})")
         break
+SURE_EGITIM_SN = None if SKIP_TRAIN else round(time.time() - T_EGITIM_BASLA)
 
 model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
 model.to(DEVICE)
@@ -505,6 +550,11 @@ np.savez("thresholds.npz", band=band_thr, band_classes=BAND_CLASSES)
 # 6) TEST + YAYIN ÇIKTILARI
 # ===========================================================================
 os.makedirs(FIG_DIR, exist_ok=True)
+# Omurga karsilastirma tablosu icin: model buyuklugu ve egitim suresi
+pd.DataFrame([{"backbone": OMURGA, "params_M": round(N_PARAM / 1e6, 2),
+               "epochs_run": None if SKIP_TRAIN else N_EPOCH_KOSULAN,
+               "train_time_s": SURE_EGITIM_SN, "input_px": COZUNURLUK,
+               "batch": BATCH_SIZE}]).to_csv(f"{FIG_DIR}/model_info.csv", index=False)
 tP, tB, tF, tL, typ, tyb, tyf, tyl, tlm = predict(test_ld)
 pred_band = (tB >= band_thr[None, :]).astype(int)
 pred_pat = tP.argmax(1)

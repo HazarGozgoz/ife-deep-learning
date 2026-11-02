@@ -23,6 +23,13 @@ KULLANIM
     python capraz_dogrulama.py --ayar "--cozunurluk=384 --bant-hedefi=kesin"
     python capraz_dogrulama.py --sadece-topla        # egitim bitti, sadece havuzla
 
+OMURGA KARSILASTIRMASI (yayindaki cv/ sonuclarina DOKUNMAZ)
+    python capraz_dogrulama.py --omurga=resnet50
+      -> cv/kat_1..5 icindeki AYNI kat dosyalarini kullanir (katlar yeniden
+         uretilmez), ciktilari cv_resnet50/ klasorune yazar.
+    Secenekler: resnet50 | efficientnet_b0 | densenet121 | swin_t
+    Elle: --cv-klasoru=<klasor> --katlari-kullan=<eski cv klasoru>
+
 CIKTI
 ------
     cv/kat_1..5/          her katin yayin ciktilari
@@ -80,24 +87,62 @@ def main():
     ap.add_argument("--ayar", default="", help="Egitim scriptine gecirilecek ek argumanlar")
     ap.add_argument("--sadece-topla", action="store_true")
     ap.add_argument("--esik-modu", default="dengeli", choices=["dengeli", "tarama"])
+    ap.add_argument("--omurga", default=None,
+                    help="resnet50 | efficientnet_b0 | densenet121 | swin_t (karsilastirma kosusu)")
+    ap.add_argument("--cv-klasoru", default=None, help="ciktilarin yazilacagi klasor (varsayilan cv)")
+    ap.add_argument("--katlari-kullan", default=None,
+                    help="katlari yeniden uretme; bu klasordeki kat_1..5 CSV'lerini kullan (or. cv)")
+    ap.add_argument("--uzerine-yaz", action="store_true",
+                    help="klasorde onceki sonuc varsa yine de ez (dikkat)")
     a = ap.parse_args()
+
+    global CV_DIR
+    if a.omurga:
+        a.ayar = (a.ayar + f" --omurga={a.omurga}").strip()
+        a.cv_klasoru = a.cv_klasoru or f"cv_{a.omurga}"
+        a.katlari_kullan = a.katlari_kullan or "cv"
+    CV_DIR = Path(a.cv_klasoru or "cv")
+    if (CV_DIR / "havuz_tahminleri.npz").exists() and not (a.sadece_topla or a.uzerine_yaz):
+        raise SystemExit(f"{CV_DIR}/ icinde onceki sonuclar var; ezilmesin diye durduruldu.\n"
+                         f"Bilerek yeniden kosmak icin --uzerine-yaz ekleyin.")
     CV_DIR.mkdir(exist_ok=True)
+    print(f"Cikti klasoru: {CV_DIR}/  |  egitim ayarlari: {a.ayar or '(varsayilan)'}")
 
     if not a.sadece_topla:
-        df = pd.read_csv(MASTER)
-        if "sample_type" in df.columns:
-            df = df[df["sample_type"].astype(str).str.upper() == "SERUM"]
-        df = katlari_uret(df)
-        print(f"{len(df)} kayit, {df['source_file'].nunique()} jel -> {K} kat")
+        if a.katlari_kullan:
+            kaynak = Path(a.katlari_kullan)
+            for k in range(K):
+                for ad in ("train", "validation", "test"):
+                    if not (kaynak / f"kat_{k + 1}" / f"{ad}_annotations.csv").exists():
+                        raise SystemExit(f"{kaynak}/kat_{k + 1}/{ad}_annotations.csv yok.")
+            print(f"Katlar yeniden URETILMIYOR: {kaynak}/kat_1..{K} dosyalari kullaniliyor")
+        else:
+            df = pd.read_csv(MASTER)
+            if "sample_type" in df.columns:
+                df = df[df["sample_type"].astype(str).str.upper() == "SERUM"]
+            df = katlari_uret(df)
+            print(f"{len(df)} kayit, {df['source_file'].nunique()} jel -> {K} kat")
 
         for k in range(K):
             kat = CV_DIR / f"kat_{k + 1}"
             kat.mkdir(exist_ok=True)
-            ntr, nva, nte, nj = kat_yaz(df, k, kat)
+            if a.katlari_kullan:
+                for ad in ("train", "validation", "test"):
+                    shutil.copy(Path(a.katlari_kullan) / f"kat_{k + 1}" / f"{ad}_annotations.csv",
+                                kat / f"{ad}_annotations.csv")
+                _d = {ad: pd.read_csv(kat / f"{ad}_annotations.csv") for ad in ("train", "validation", "test")}
+                ntr, nva, nte = len(_d["train"]), len(_d["validation"]), len(_d["test"])
+                nj = _d["test"]["source_file"].nunique()
+            else:
+                ntr, nva, nte, nj = kat_yaz(df, k, kat)
             print(f"\n=== KAT {k + 1}/{K}: train {ntr} | val {nva} | test {nte} ({nj} jel) ===")
             # Egitim scripti sabit dosya adlari okur: kat dosyalarini yerine koy
             for ad in ("train", "validation", "test"):
                 shutil.copy(kat / f"{ad}_annotations.csv", f"{ad}_annotations.csv")
+            # Yalniz BU katin urettigi klasor/model tasinsin: kok dizinde baska
+            # yayin_ciktilari_* klasorleri (bagimsiz referans, holdout...) varsa dokunulmaz.
+            onceki_klasor = {p.name for p in Path(".").glob("yayin_ciktilari_*") if p.is_dir()}
+            onceki_pth = {p.name for p in Path(".").glob("best_ife_*.pth")}
             cmd = [sys.executable, "egitim_ve_degerlendirme.py", f"--esik-modu={a.esik_modu}",
                    "--dil=en"] + a.ayar.split()
             r = subprocess.run(cmd)
@@ -105,12 +150,14 @@ def main():
                 raise SystemExit(f"Kat {k + 1} egitimi basarisiz (kod {r.returncode}).")
             # Ciktilari kata tasi
             for p in Path(".").glob("yayin_ciktilari_*"):
-                if p.is_dir():
+                if p.is_dir() and p.name not in onceki_klasor:
                     hedef = kat / p.name
                     if hedef.exists():
                         shutil.rmtree(hedef)
                     shutil.move(str(p), str(hedef))
             for p in Path(".").glob("best_ife_*.pth"):
+                if p.name in onceki_pth:
+                    continue
                 shutil.move(str(p), str(kat / p.name))
             print(f"Kat {k + 1} tamamlandi -> {kat}/")
 
@@ -119,6 +166,16 @@ def main():
     parcalar = []
     for k in range(K):
         adaylar = list((CV_DIR / f"kat_{k + 1}").glob("yayin_ciktilari_*/test_tahminleri.npz"))
+        # Kat klasorune yanlislikla tasinmis baska analiz klasorleri (holdout, uyarlama,
+        # bagimsiz referans) havuza KARISMASIN: yalniz bu kosunun ciktisi secilir.
+        if a.omurga:
+            adaylar = [x for x in adaylar if f"_{a.omurga}" in x.parent.name]
+        else:
+            yabanci = ("resnet50", "efficientnet_b0", "densenet121", "swin_t", "holdout", "uyarlama", "bagimsiz")
+            adaylar = [x for x in adaylar if not any(y in x.parent.name for y in yabanci)]
+        if len(adaylar) > 1:
+            raise SystemExit(f"kat {k + 1}: birden fazla aday tahmin dosyasi var, hangisi oldugu belirsiz:\n  "
+                             + "\n  ".join(str(x) for x in adaylar))
         if not adaylar:
             print(f"  kat {k + 1}: tahmin dosyasi yok, atlandi")
             continue
@@ -155,7 +212,8 @@ def main():
     acc = s[s["fold"] != "POOLED"]["pattern_acc"]
     print(f"\nKatlar arasi patern dogrulugu: {acc.mean():.3f} ± {acc.std():.3f}")
     print(f"\n-> {CV_DIR}/havuz_tahminleri.npz")
-    print("Guven araligi icin:  python guven_araligi.py --girdi cv/havuz_tahminleri.npz")
+    print(f"Guven araligi icin:  python guven_araligi.py --girdi {CV_DIR}/havuz_tahminleri.npz")
+    print("UNUTMAYIN: normal bolmeyi geri getirmek icin  python veri_hazirlama.py")
 
 
 if __name__ == "__main__":
